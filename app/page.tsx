@@ -34,9 +34,9 @@ export default function Home() {
   const [historyIces, setHistoryIces] = useState<IceLog[]>([]);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   
-  // UI State - Default to 2024 to prevent flickering
+  // UI State
   const [detectedWeek, setDetectedWeek] = useState<number | null>(null);
-  const [detectedSeason, setDetectedSeason] = useState<string>("2024"); 
+  const [detectedSeason, setDetectedSeason] = useState<string>("2024");
   const [historySeasonFilter, setHistorySeasonFilter] = useState<string>("2024");
   const [timeLeft, setTimeLeft] = useState("Calculating...");
   
@@ -51,27 +51,40 @@ export default function Home() {
     // Load from Memory first
     const cachedWeek = localStorage.getItem('detectedWeek');
     const cachedSeason = localStorage.getItem('detectedSeason');
+    
+    let seasonToUse = detectedSeason; // Default to current state
+
     if (cachedWeek) setDetectedWeek(Number(cachedWeek));
     if (cachedSeason) {
       setDetectedSeason(cachedSeason);
+      seasonToUse = cachedSeason; // Use cached value for immediate fetches
       if (historySeasonFilter === "2024") setHistorySeasonFilter(cachedSeason);
     }
 
-    // Fetch fresh data
+    // Fetch fresh data immediately
     fetchActiveData();
     fetchHistoryData();
+    fetchLeaderboard(seasonToUse); // <--- FORCE FETCH LEADERBOARD ON LOAD
+
     // Start countdown
     const timer = setInterval(calculateCountdown, 1000);
+    
     // Background Sync
     handleSync(true); 
     
     return () => clearInterval(timer);
+  }, []); // Run once on mount
+
+  // Update leaderboard if season changes via Sync
+  useEffect(() => {
+    fetchLeaderboard(detectedSeason);
+  }, [detectedSeason]);
+  
+  // Refetch history if filter changes
+  useEffect(() => {
+    fetchHistoryData();
   }, [historySeasonFilter]);
 
-  // Update leaderboard when season changes
-  useEffect(() => {
-    fetchLeaderboard();
-  }, [detectedSeason]);
 
   // --- DATA FETCHING ---
   const fetchActiveData = async () => {
@@ -90,8 +103,10 @@ export default function Home() {
     if (data) setHistoryIces(data as IceLog[]);
   };
 
-  const fetchLeaderboard = async () => {
-    const targetSeason = detectedSeason || "2024";
+  // Modified to accept an optional season override
+  const fetchLeaderboard = async (seasonOverride?: string) => {
+    const targetSeason = seasonOverride || detectedSeason || "2024";
+    
     const { data } = await supabase
       .from('ice_log')
       .select('team_name')
@@ -130,7 +145,7 @@ export default function Home() {
       }
       
       await fetchActiveData();
-      await fetchLeaderboard();
+      await fetchLeaderboard(json.currentSeason); // Explicitly pass new season
     } catch (e) {
       console.error(e);
       if (!isBackground) alert("Sync failed. Check console.");
@@ -400,7 +415,7 @@ export default function Home() {
           </button>
         </div>
 
-        {/* 3. LEADERBOARD (Moved OUT of tabs so it never hides) */}
+        {/* 3. LEADERBOARD (Global) */}
         {leaderboard.length > 0 && (
           <div className="bg-gradient-to-r from-blue-900 to-slate-800 rounded-2xl shadow-lg p-6 text-white relative overflow-hidden animate-in zoom-in-95 duration-500">
             <div className="flex items-center gap-3 mb-4 relative z-10">
