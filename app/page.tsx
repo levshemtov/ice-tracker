@@ -1,9 +1,8 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
-import { Beer, Lock, RefreshCw, Clock, Trophy } from 'lucide-react';
+import { Beer, Lock, RefreshCw, Clock, Trophy, Flame, Upload, Video, History, PlayCircle, Calendar, ChevronDown, ChevronUp, Medal } from 'lucide-react';
 
-// Define the shape of an Ice Record
 interface IceLog {
   id: number;
   roster_id: number;
@@ -14,228 +13,420 @@ interface IceLog {
   type: 'PRINCIPAL' | 'INTEREST';
   parent_id: number | null;
   status: string;
+  proof_url?: string;
+  season?: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+interface LeaderboardEntry {
+  team_name: string;
+  count: number;
 }
 
 export default function Home() {
+  const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
+  
+  // Data State
   const [loading, setLoading] = useState(false);
+  const [uploadingId, setUploadingId] = useState<number | null>(null); 
   const [ices, setIces] = useState<IceLog[]>([]);
-  const [currentWeek, setCurrentWeek] = useState(1);
-  const [timeLeft, setTimeLeft] = useState("Calculatng...");
+  const [historyIces, setHistoryIces] = useState<IceLog[]>([]);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  
+  // UI State
+  const [detectedWeek, setDetectedWeek] = useState<number | null>(null);
+  const [detectedSeason, setDetectedSeason] = useState<string>("2024");
+  const [historySeasonFilter, setHistorySeasonFilter] = useState<string>("2024");
+  const [timeLeft, setTimeLeft] = useState("Calculating...");
+  
+  // Collapsible State (Set of team names that are OPEN)
+  const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
 
-  // 1. Initial Load
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const selectedIceIdRef = useRef<number | null>(null);
+
   useEffect(() => {
-    fetchData();
-    // Start the countdown timer
+    fetchActiveData();
+    fetchHistoryData();
+    // Start countdown
     const timer = setInterval(calculateCountdown, 1000);
+    // Initial Sync on load
+    handleSync(true); 
     return () => clearInterval(timer);
-  }, []);
+  }, [historySeasonFilter]);
 
-  const fetchData = async () => {
-    const { data } = await supabase
-      .from('ice_log')
-      .select('*')
-      .eq('status', 'PENDING');
-    
+  // Update leaderboard whenever history data changes or season changes
+  useEffect(() => {
+    fetchLeaderboard();
+  }, [detectedSeason]);
+
+  // --- DATA FETCHING ---
+  const fetchActiveData = async () => {
+    const { data } = await supabase.from('ice_log').select('*').eq('status', 'PENDING');
     if (data) setIces(data as IceLog[]);
   };
 
-  // 2. Sync Logic
-  const handleSync = async () => {
-    setLoading(true);
-    try {
-      await fetch('/api/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ currentWeek }),
+  const fetchHistoryData = async () => {
+    const { data } = await supabase
+      .from('ice_log')
+      .select('*')
+      .eq('status', 'COMPLETE')
+      .eq('season', historySeasonFilter)
+      .order('completed_at', { ascending: false });
+      
+    if (data) setHistoryIces(data as IceLog[]);
+  };
+
+  const fetchLeaderboard = async () => {
+    // Get all completed ices for the CURRENT detected season
+    const { data } = await supabase
+      .from('ice_log')
+      .select('team_name')
+      .eq('status', 'COMPLETE')
+      .eq('season', detectedSeason);
+
+    if (data) {
+      const counts: Record<string, number> = {};
+      data.forEach(row => {
+        counts[row.team_name] = (counts[row.team_name] || 0) + 1;
       });
-      await fetchData(); // Refresh data after sync
+
+      const sorted = Object.entries(counts)
+        .map(([team_name, count]) => ({ team_name, count }))
+        .sort((a, b) => b.count - a.count); // Sort high to low
+
+      setLeaderboard(sorted);
+    }
+  };
+
+  // --- ACTIONS ---
+  const handleSync = async (isBackground = false) => {
+    if (!isBackground) setLoading(true);
+    try {
+      const res = await fetch('/api/sync', { method: 'POST' });
+      const json = await res.json();
+      
+      if (json.currentWeek) setDetectedWeek(json.currentWeek);
+      if (json.currentSeason) {
+        setDetectedSeason(json.currentSeason);
+        if (!detectedSeason) setHistorySeasonFilter(json.currentSeason); 
+      }
+      
+      await fetchActiveData();
+      await fetchLeaderboard(); // Refresh leaderboard on sync
     } catch (e) {
       console.error(e);
+      if (!isBackground) alert("Sync failed. Check console.");
     }
     setLoading(false);
   };
 
-  // 3. Mark Complete
-  const markComplete = async (id: number) => {
-    await supabase
-      .from('ice_log')
-      .update({ status: 'COMPLETE', completed_at: new Date().toISOString() })
-      .eq('id', id);
-    fetchData(); // Optimistic update would be faster, but this ensures accuracy
+  const toggleTeam = (teamName: string) => {
+    const newExpanded = new Set(expandedTeams);
+    if (newExpanded.has(teamName)) {
+      newExpanded.delete(teamName);
+    } else {
+      newExpanded.add(teamName);
+    }
+    setExpandedTeams(newExpanded);
   };
 
-  // 4. Countdown Logic: Target Monday Midnight (Tuesday 00:00:00)
+  // --- UPLOAD LOGIC ---
+  const triggerUpload = (id: number) => {
+    selectedIceIdRef.current = id;
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    const iceId = selectedIceIdRef.current;
+    if (!file || !iceId) return;
+
+    setUploadingId(iceId);
+
+    try {
+      const fileName = `${Date.now()}_${iceId}_${file.name.replace(/\s/g, '_')}`;
+      const { error: uploadError } = await supabase.storage.from('proofs').upload(fileName, file);
+      if (uploadError) throw uploadError;
+
+      const { data: { publicUrl } } = supabase.storage.from('proofs').getPublicUrl(fileName);
+
+      const { error: dbError } = await supabase
+        .from('ice_log')
+        .update({ 
+          status: 'COMPLETE', 
+          completed_at: new Date().toISOString(),
+          proof_url: publicUrl 
+        })
+        .eq('id', iceId);
+
+      if (dbError) throw dbError;
+
+      await fetchActiveData();
+      await fetchHistoryData();
+      await fetchLeaderboard();
+      await handleSync(true); 
+
+    } catch (error) {
+      alert("Error uploading proof: " + (error as any).message);
+    } finally {
+      setUploadingId(null);
+      selectedIceIdRef.current = null;
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const payOneInterest = (teamInterestIces: IceLog[]) => {
+    if (teamInterestIces.length === 0) return;
+    triggerUpload(teamInterestIces[0].id);
+  };
+
+  // --- TIME LOGIC ---
   const calculateCountdown = () => {
     const now = new Date();
     const d = new Date();
-    
-    // Logic: Find the next Tuesday (Day 2)
-    // If today is Tuesday (2), we want next Tuesday (+7 days)
-    // If today is Monday (1), we want tomorrow (+1 day)
-    const currentDay = d.getDay(); // 0=Sun, 1=Mon, 2=Tue...
+    const currentDay = d.getDay(); 
     const targetDay = 2; // Tuesday
-    
     let daysUntil = targetDay - currentDay;
-    if (daysUntil <= 0) {
-      daysUntil += 7;
-    }
-
-    // However, if it is currently Monday (1), the math above gives 1 day.
-    // We want Monday Night / Tuesday Morning 00:00. 
-    // If it is currently Tuesday (2), daysUntil is 7 (next week).
+    if (daysUntil <= 0) daysUntil += 7;
     
     d.setDate(d.getDate() + daysUntil);
-    d.setHours(0, 0, 0, 0); // Set to Midnight
-    
-    // If we are currently "On" Tuesday (e.g. 1AM), the logic above might push to next week.
-    // If we want Monday Midnight (aka Tuesday 00:00), we just need to target the very next occurrence of Day 2 00:00.
+    d.setHours(0, 0, 0, 0); 
     
     const diff = d.getTime() - now.getTime();
-    
-    // If diff is practically 7 days, check if we accidentally skipped "today" if today was Tuesday? 
-    // (Wait, no, if it's Tuesday 1AM, the deadline passed 1 hour ago, so next deadline IS next week. Logic holds.)
-
     const days = Math.floor(diff / (1000 * 60 * 60 * 24));
     const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
     const minutes = Math.floor((diff / 1000 / 60) % 60);
     const seconds = Math.floor((diff / 1000) % 60);
-
     setTimeLeft(`${days}d ${hours}h ${minutes}m ${seconds}s`);
   };
 
-  // Group teams
   const teamNames = Array.from(new Set(ices.map(i => i.team_name)));
+
+  // --- RENDER HELPERS ---
+  const renderActiveLedger = () => (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      
+      {/* STATUS HEADER */}
+      <div className="flex flex-col sm:flex-row justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-200 gap-4">
+        <div className="flex items-center gap-3">
+          <div className="bg-green-100 p-2 rounded-lg text-green-700">
+            <Calendar size={24} />
+          </div>
+          <div className="text-left">
+            <div className="text-xs text-slate-400 font-bold uppercase tracking-wider">Current NFL State</div>
+            <div className="font-bold text-slate-800 text-lg">
+              {detectedWeek ? `Week ${detectedWeek}` : 'Loading...'} • {detectedSeason}
+            </div>
+          </div>
+        </div>
+        
+        <button 
+          onClick={() => handleSync(false)} 
+          disabled={loading} 
+          className="text-slate-400 hover:text-blue-600 transition-colors flex items-center gap-2 text-sm font-semibold"
+          title="Force check for new scores"
+        >
+          {loading ? <RefreshCw className="animate-spin" size={16} /> : <RefreshCw size={16} />} 
+          {loading ? 'Updating...' : 'Force Sync'}
+        </button>
+      </div>
+
+      {/* --- LEADERBOARD SECTION --- */}
+      {leaderboard.length > 0 && (
+        <div className="bg-gradient-to-r from-blue-900 to-slate-800 rounded-2xl shadow-lg p-6 text-white relative overflow-hidden">
+          <div className="flex items-center gap-3 mb-4 relative z-10">
+            <Trophy className="text-yellow-400" />
+            <h3 className="font-bold text-lg">Season Leaders (Most Drank)</h3>
+          </div>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 relative z-10">
+            {leaderboard.slice(0, 3).map((entry, index) => (
+              <div key={entry.team_name} className="bg-white/10 p-3 rounded-lg backdrop-blur-sm flex items-center gap-3 border border-white/10">
+                <div className={`font-bold text-xl w-8 h-8 flex items-center justify-center rounded-full ${index === 0 ? 'bg-yellow-400 text-yellow-900' : index === 1 ? 'bg-slate-300 text-slate-800' : 'bg-orange-400 text-orange-900'}`}>
+                  {index + 1}
+                </div>
+                <div>
+                  <div className="font-bold text-sm truncate w-32">{entry.team_name}</div>
+                  <div className="text-xs opacity-70">{entry.count} Ices Cleared</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* Decorative Circle */}
+          <div className="absolute -right-10 -top-10 w-40 h-40 bg-white/5 rounded-full blur-2xl"></div>
+        </div>
+      )}
+
+      {teamNames.length === 0 && (
+        <div className="text-center py-12 bg-white rounded-2xl border-2 border-dashed border-slate-200">
+          <div className="text-4xl mb-2">🎉</div>
+          <div className="text-slate-500 font-medium">The league is clean. No Ices owed!</div>
+        </div>
+      )}
+
+      <div className="grid gap-4">
+        {teamNames.map(team => {
+          const teamIces = ices.filter(i => i.team_name === team);
+          const interest = teamIces.filter(i => i.type === 'INTEREST');
+          const principal = teamIces.filter(i => i.type === 'PRINCIPAL');
+          const hasInterest = interest.length > 0;
+          const isExpanded = expandedTeams.has(team);
+
+          return (
+            <div key={team} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden transition-all">
+              {/* COLLAPSIBLE HEADER */}
+              <div 
+                onClick={() => toggleTeam(team)}
+                className="bg-slate-50 p-4 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  {isExpanded ? <ChevronUp className="text-slate-400"/> : <ChevronDown className="text-slate-400"/>}
+                  <h3 className="font-bold text-lg text-slate-800">{team}</h3>
+                </div>
+                <span className={`px-3 py-1 rounded-full text-sm font-bold shadow-sm ${teamIces.length > 0 ? 'bg-red-100 text-red-700' : 'bg-slate-200 text-slate-600'}`}>
+                  {teamIces.length} Pending
+                </span>
+              </div>
+
+              {/* EXPANDABLE CONTENT */}
+              {isExpanded && (
+                <div className="p-4 space-y-4 border-t border-slate-100 animate-in slide-in-from-top-2">
+                  {hasInterest && (
+                    <div className="bg-red-50 border-2 border-red-100 rounded-xl p-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="bg-red-200 p-3 rounded-full"><Flame size={24} className="text-red-600" /></div>
+                        <div>
+                          <h4 className="text-red-700 font-extrabold text-lg">Interest Penalty</h4>
+                          <p className="text-red-500 text-sm font-medium">Clear <span className="font-black">{interest.length}</span> interest ices first.</p>
+                        </div>
+                      </div>
+                      <button onClick={() => payOneInterest(interest)} disabled={uploadingId !== null} className="w-full sm:w-auto bg-red-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-red-700 shadow-sm transition-all flex items-center justify-center gap-2">
+                        {uploadingId && interest.some(i => i.id === uploadingId) ? <><RefreshCw className="animate-spin" size={18}/> Uploading...</> : <><Upload size={18}/> Clear 1 Ice (-1)</>}
+                      </button>
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                      {principal.map(ice => (
+                      <div key={ice.id} className="flex justify-between items-center p-3 border border-slate-100 rounded-xl hover:bg-slate-50 transition-colors">
+                          <div className="flex items-center gap-3">
+                            <div className="bg-blue-100 p-2 rounded-lg"><Beer size={18} className="text-blue-600" /></div>
+                            <div>
+                              <span className="block font-bold text-slate-700 text-sm">Week {ice.week_incurred}: {ice.player_name}</span>
+                              <span className="text-xs text-slate-400 font-mono">{ice.score} Points</span>
+                            </div>
+                          </div>
+                          {hasInterest ? (
+                            <button disabled className="bg-slate-100 text-slate-400 px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-1 cursor-not-allowed border border-slate-200"><Lock size={14} /> Locked</button>
+                          ) : (
+                            <button onClick={() => triggerUpload(ice.id)} disabled={uploadingId !== null} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow-sm transition-all flex items-center gap-2">
+                              {uploadingId === ice.id ? <><RefreshCw className="animate-spin" size={14}/> Uploading...</> : <><Video size={14}/> Proof & Clear</>}
+                            </button>
+                          )}
+                      </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  );
+
+  const renderHistory = () => (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+        <h3 className="font-bold text-slate-700 flex items-center gap-2"><History size={20}/> History Vault</h3>
+        <select 
+          value={historySeasonFilter}
+          onChange={(e) => setHistorySeasonFilter(e.target.value)}
+          className="bg-slate-100 border-none rounded-lg px-4 py-2 font-bold text-slate-600 focus:ring-2 focus:ring-blue-500 outline-none"
+        >
+          <option value="2024">Season 2024</option>
+          <option value="2025">Season 2025</option>
+          <option value="2026">Season 2026</option>
+        </select>
+      </div>
+
+      {historyIces.length === 0 ? (
+        <div className="text-center py-12 text-slate-400 italic">No completed ices found for {historySeasonFilter}.</div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {historyIces.map(ice => (
+            <div key={ice.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-3">
+              <div className="flex justify-between items-start">
+                <div>
+                  <div className="font-bold text-slate-800">{ice.team_name}</div>
+                  <div className="text-xs text-slate-400">Completed: {new Date(ice.completed_at!).toLocaleDateString()}</div>
+                </div>
+                <div className={`px-2 py-1 rounded text-xs font-bold ${ice.type === 'PRINCIPAL' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
+                  {ice.type}
+                </div>
+              </div>
+              
+              <div className="text-sm text-slate-600">
+                {ice.type === 'PRINCIPAL' ? (
+                  <span>Week {ice.week_incurred}: {ice.player_name} ({ice.score} pts)</span>
+                ) : (
+                  <span>Interest Payment (Week {ice.week_incurred})</span>
+                )}
+              </div>
+
+              {ice.proof_url ? (
+                 <a href={ice.proof_url} target="_blank" rel="noopener noreferrer" className="mt-2 w-full flex items-center justify-center gap-2 bg-slate-900 text-white py-2 rounded-lg font-bold hover:bg-slate-700 transition-colors">
+                   <PlayCircle size={16}/> Watch Proof
+                 </a>
+              ) : (
+                <div className="mt-2 w-full text-center py-2 bg-slate-100 text-slate-400 rounded-lg text-sm italic">No Video Attached</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <main className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
+      <input type="file" accept="video/*,image/*" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
+
       <div className="max-w-3xl mx-auto space-y-8">
-        
-        {/* --- HEADER --- */}
+        {/* HEADER */}
         <div className="text-center space-y-6">
           <h1 className="text-4xl md:text-5xl font-extrabold text-slate-900 flex flex-col md:flex-row items-center justify-center gap-3">
             <Beer className="w-12 h-12 text-blue-500" /> 
             <span>Ice Tracker</span>
           </h1>
-          
-          {/* Countdown Card */}
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 inline-block w-full md:w-auto min-w-[300px]">
              <div className="flex items-center justify-center gap-2 text-slate-500 text-sm font-semibold uppercase tracking-wider mb-2">
                 <Clock size={16} /> Interest Countdown
              </div>
-             <div className="text-4xl font-mono font-bold text-red-500 tabular-nums tracking-tight">
-               {timeLeft}
-             </div>
+             <div className="text-4xl font-mono font-bold text-red-500 tabular-nums tracking-tight">{timeLeft}</div>
              <div className="text-xs text-slate-400 mt-2">Deadline: Monday Night (Midnight)</div>
           </div>
         </div>
 
-        {/* --- CONTROLS --- */}
-        <div className="flex flex-col md:flex-row gap-4 justify-center items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-          <div className="flex flex-col items-center">
-            <label className="text-xs text-slate-400 font-bold uppercase mb-1">Set NFL Week</label>
-            <input 
-              type="number" 
-              value={currentWeek} 
-              onChange={(e) => setCurrentWeek(Number(e.target.value))}
-              className="border-2 border-slate-200 focus:border-blue-500 outline-none p-2 rounded-lg w-24 font-bold text-center text-xl"
-              min={1} max={18}
-            />
-          </div>
+        {/* TAB SWITCHER */}
+        <div className="flex p-1 bg-slate-200 rounded-xl">
           <button 
-            onClick={handleSync}
-            disabled={loading}
-            className="w-full md:w-auto bg-blue-600 text-white px-8 py-3 rounded-xl font-bold text-lg hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md shadow-blue-200"
+            onClick={() => setActiveTab('active')}
+            className={`flex-1 py-2 font-bold rounded-lg transition-all ${activeTab === 'active' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
           >
-            {loading ? <RefreshCw className="animate-spin" /> : <RefreshCw />} 
-            {loading ? 'Syncing...' : 'Sync Data'}
+            Active Ledger
+          </button>
+          <button 
+            onClick={() => setActiveTab('history')}
+            className={`flex-1 py-2 font-bold rounded-lg transition-all ${activeTab === 'history' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            History Vault
           </button>
         </div>
 
-        {/* --- THE LEDGER --- */}
-        <div className="space-y-6">
-          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-            <Trophy className="text-yellow-500" /> The Ledger
-          </h2>
-          
-          {teamNames.length === 0 && (
-            <div className="text-center py-12 bg-white rounded-2xl border border-dashed border-slate-300">
-              <div className="text-4xl mb-2">🎉</div>
-              <div className="text-slate-500 font-medium">The league is clean. No Ices owed!</div>
-            </div>
-          )}
-          
-          <div className="grid gap-6">
-            {teamNames.map(team => {
-              const teamIces = ices.filter(i => i.team_name === team);
-              const interest = teamIces.filter(i => i.type === 'INTEREST');
-              const principal = teamIces.filter(i => i.type === 'PRINCIPAL');
-              const hasInterest = interest.length > 0;
-
-              return (
-                <div key={team} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                  {/* Team Header */}
-                  <div className="bg-slate-100/50 p-4 flex justify-between items-center border-b border-slate-100">
-                    <h3 className="font-bold text-lg text-slate-800">{team}</h3>
-                    <span className="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-bold shadow-sm">
-                      {teamIces.length} Owed
-                    </span>
-                  </div>
-                  
-                  <div className="p-4 space-y-3">
-                    {/* INTEREST ITEMS */}
-                    {interest.map(ice => (
-                      <div key={ice.id} className="flex justify-between items-center p-3 bg-red-50 border border-red-100 rounded-xl">
-                        <div className="flex items-center gap-3">
-                          <div className="bg-red-200 p-2 rounded-lg">
-                            <Clock size={18} className="text-red-700" />
-                          </div>
-                          <div>
-                            <span className="block text-red-700 font-bold text-sm">INTEREST PENALTY</span>
-                            <span className="text-xs text-red-400">From Week {ice.week_incurred} Principal</span>
-                          </div>
-                        </div>
-                        <button 
-                          onClick={() => markComplete(ice.id)}
-                          className="bg-white text-red-600 border border-red-200 px-4 py-2 rounded-lg text-sm font-bold hover:bg-red-50 transition-colors"
-                        >
-                          Complete
-                        </button>
-                      </div>
-                    ))}
-
-                    {/* PRINCIPAL ITEMS */}
-                    {principal.map(ice => (
-                      <div key={ice.id} className="flex justify-between items-center p-3 border border-slate-100 rounded-xl hover:bg-slate-50 transition-colors">
-                        <div className="flex items-center gap-3">
-                          <div className="bg-blue-100 p-2 rounded-lg">
-                            <Beer size={18} className="text-blue-600" />
-                          </div>
-                          <div>
-                            <span className="block font-bold text-slate-700 text-sm">Week {ice.week_incurred}: {ice.player_name}</span>
-                            <span className="text-xs text-slate-400 font-mono">{ice.score} Points</span>
-                          </div>
-                        </div>
-                        
-                        {hasInterest ? (
-                          <button disabled className="bg-slate-100 text-slate-400 px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-1 cursor-not-allowed">
-                            <Lock size={14} /> Locked
-                          </button>
-                        ) : (
-                          <button 
-                            onClick={() => markComplete(ice.id)}
-                            className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow-sm shadow-blue-200 transition-all active:scale-95"
-                          >
-                            Complete
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
+        {/* CONTENT */}
+        {activeTab === 'active' ? renderActiveLedger() : renderHistory()}
       </div>
     </main>
   );
