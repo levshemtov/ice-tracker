@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
-import { Beer, Lock, RefreshCw, Clock, Trophy, Flame, Upload, Video, History, PlayCircle, Calendar, ChevronDown, ChevronUp } from 'lucide-react';
+import { Beer, Lock, RefreshCw, Clock, Trophy, Flame, Upload, Video, History, PlayCircle, Calendar, ChevronDown, ChevronUp, Trash2 } from 'lucide-react';
 
 interface IceLog {
   id: number;
@@ -40,7 +40,7 @@ export default function Home() {
   const [historySeasonFilter, setHistorySeasonFilter] = useState<string>("2024");
   const [timeLeft, setTimeLeft] = useState("Calculating...");
   
-  // Collapsible State
+  // Collapsible State (Shared between tabs so if you expand a team in Active, they are expanded in History too)
   const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -48,43 +48,35 @@ export default function Home() {
 
   // 1. INITIAL LOAD & MEMORY
   useEffect(() => {
-    // Load from Memory first
     const cachedWeek = localStorage.getItem('detectedWeek');
     const cachedSeason = localStorage.getItem('detectedSeason');
     
-    let seasonToUse = detectedSeason; // Default to current state
+    let seasonToUse = detectedSeason; 
 
     if (cachedWeek) setDetectedWeek(Number(cachedWeek));
     if (cachedSeason) {
       setDetectedSeason(cachedSeason);
-      seasonToUse = cachedSeason; // Use cached value for immediate fetches
+      seasonToUse = cachedSeason;
       if (historySeasonFilter === "2024") setHistorySeasonFilter(cachedSeason);
     }
 
-    // Fetch fresh data immediately
     fetchActiveData();
     fetchHistoryData();
-    fetchLeaderboard(seasonToUse); // <--- FORCE FETCH LEADERBOARD ON LOAD
+    fetchLeaderboard(seasonToUse);
 
-    // Start countdown
     const timer = setInterval(calculateCountdown, 1000);
-    
-    // Background Sync
     handleSync(true); 
     
     return () => clearInterval(timer);
-  }, []); // Run once on mount
+  }, []); 
 
-  // Update leaderboard if season changes via Sync
   useEffect(() => {
     fetchLeaderboard(detectedSeason);
   }, [detectedSeason]);
   
-  // Refetch history if filter changes
   useEffect(() => {
     fetchHistoryData();
   }, [historySeasonFilter]);
-
 
   // --- DATA FETCHING ---
   const fetchActiveData = async () => {
@@ -103,10 +95,8 @@ export default function Home() {
     if (data) setHistoryIces(data as IceLog[]);
   };
 
-  // Modified to accept an optional season override
   const fetchLeaderboard = async (seasonOverride?: string) => {
     const targetSeason = seasonOverride || detectedSeason || "2024";
-    
     const { data } = await supabase
       .from('ice_log')
       .select('team_name')
@@ -118,11 +108,9 @@ export default function Home() {
       data.forEach(row => {
         counts[row.team_name] = (counts[row.team_name] || 0) + 1;
       });
-
       const sorted = Object.entries(counts)
         .map(([team_name, count]) => ({ team_name, count }))
         .sort((a, b) => b.count - a.count);
-
       setLeaderboard(sorted);
     }
   };
@@ -145,7 +133,7 @@ export default function Home() {
       }
       
       await fetchActiveData();
-      await fetchLeaderboard(json.currentSeason); // Explicitly pass new season
+      await fetchLeaderboard(json.currentSeason);
     } catch (e) {
       console.error(e);
       if (!isBackground) alert("Sync failed. Check console.");
@@ -160,6 +148,41 @@ export default function Home() {
     setExpandedTeams(newExpanded);
   };
 
+  // --- UNDO / DELETE LOGIC ---
+  const handleUndo = async (ice: IceLog) => {
+    if (!confirm("Are you sure? This will delete the video and move the Ice back to 'Pending'.")) return;
+    
+    setLoading(true);
+    try {
+      if (ice.proof_url) {
+        const path = ice.proof_url.split('/proofs/')[1];
+        if (path) {
+          await supabase.storage.from('proofs').remove([path]);
+        }
+      }
+
+      const { error } = await supabase
+        .from('ice_log')
+        .update({
+          status: 'PENDING',
+          completed_at: null,
+          proof_url: null
+        })
+        .eq('id', ice.id);
+
+      if (error) throw error;
+
+      await fetchActiveData();
+      await fetchHistoryData();
+      await fetchLeaderboard();
+
+    } catch (e) {
+      alert("Error undoing ice: " + (e as any).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // --- UPLOAD LOGIC ---
   const triggerUpload = (id: number) => {
     selectedIceIdRef.current = id;
@@ -169,6 +192,10 @@ export default function Home() {
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     const iceId = selectedIceIdRef.current;
+    
+    // Reset Immediately
+    if (fileInputRef.current) fileInputRef.current.value = '';
+
     if (!file || !iceId) return;
 
     setUploadingId(iceId);
@@ -194,15 +221,17 @@ export default function Home() {
       await fetchActiveData();
       await fetchHistoryData();
       await fetchLeaderboard();
-      await handleSync(true); 
+      
+      setUploadingId(null);
+      selectedIceIdRef.current = null;
+
+      handleSync(true).catch(console.error);
 
     } catch (error) {
       alert("Error uploading proof: " + (error as any).message);
-    } finally {
       setUploadingId(null);
       selectedIceIdRef.current = null;
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
+    } 
   };
 
   const payOneInterest = (teamInterestIces: IceLog[]) => {
@@ -230,12 +259,14 @@ export default function Home() {
     setTimeLeft(`${days}d ${hours}h ${minutes}m ${seconds}s`);
   };
 
-  const teamNames = Array.from(new Set(ices.map(i => i.team_name)));
+  const activeTeamNames = Array.from(new Set(ices.map(i => i.team_name)));
+  // Get unique teams for History tab
+  const historyTeamNames = Array.from(new Set(historyIces.map(i => i.team_name)));
 
   // --- SUB-RENDERERS ---
   const renderActiveLedger = () => (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      {teamNames.length === 0 && (
+      {activeTeamNames.length === 0 && (
         <div className="text-center py-12 bg-white rounded-2xl border-2 border-dashed border-slate-200">
           <div className="text-4xl mb-2">🎉</div>
           <div className="text-slate-500 font-medium">The league is clean. No Ices owed!</div>
@@ -243,7 +274,7 @@ export default function Home() {
       )}
 
       <div className="grid gap-4">
-        {teamNames.map(team => {
+        {activeTeamNames.map(team => {
           const teamIces = ices.filter(i => i.team_name === team);
           const interest = teamIces.filter(i => i.type === 'INTEREST');
           const principal = teamIces.filter(i => i.type === 'PRINCIPAL');
@@ -252,7 +283,6 @@ export default function Home() {
 
           return (
             <div key={team} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden transition-all">
-              {/* COLLAPSIBLE HEADER */}
               <div 
                 onClick={() => toggleTeam(team)}
                 className="bg-slate-50 p-4 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors"
@@ -266,7 +296,6 @@ export default function Home() {
                 </span>
               </div>
 
-              {/* EXPANDABLE CONTENT */}
               {isExpanded && (
                 <div className="p-4 space-y-4 border-t border-slate-100 animate-in slide-in-from-top-2">
                   {hasInterest && (
@@ -330,36 +359,73 @@ export default function Home() {
       {historyIces.length === 0 ? (
         <div className="text-center py-12 text-slate-400 italic">No completed ices found for {historySeasonFilter}.</div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {historyIces.map(ice => (
-            <div key={ice.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-3">
-              <div className="flex justify-between items-start">
-                <div>
-                  <div className="font-bold text-slate-800">{ice.team_name}</div>
-                  <div className="text-xs text-slate-400">Completed: {new Date(ice.completed_at!).toLocaleDateString()}</div>
+        <div className="grid gap-4">
+          {historyTeamNames.map(team => {
+            const teamHistory = historyIces.filter(i => i.team_name === team);
+            const isExpanded = expandedTeams.has(team);
+
+            return (
+              <div key={team} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden transition-all">
+                {/* COLLAPSIBLE HEADER FOR HISTORY */}
+                <div 
+                  onClick={() => toggleTeam(team)}
+                  className="bg-slate-50 p-4 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    {isExpanded ? <ChevronUp className="text-slate-400"/> : <ChevronDown className="text-slate-400"/>}
+                    <h3 className="font-bold text-lg text-slate-800">{team}</h3>
+                  </div>
+                  <span className="px-3 py-1 rounded-full text-sm font-bold shadow-sm bg-green-100 text-green-700">
+                    {teamHistory.length} Completed
+                  </span>
                 </div>
-                <div className={`px-2 py-1 rounded text-xs font-bold ${ice.type === 'PRINCIPAL' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
-                  {ice.type}
-                </div>
-              </div>
-              
-              <div className="text-sm text-slate-600">
-                {ice.type === 'PRINCIPAL' ? (
-                  <span>Week {ice.week_incurred}: {ice.player_name} ({ice.score} pts)</span>
-                ) : (
-                  <span>Interest Payment (Week {ice.week_incurred})</span>
+
+                {/* EXPANDABLE HISTORY CONTENT */}
+                {isExpanded && (
+                  <div className="p-4 space-y-4 border-t border-slate-100 animate-in slide-in-from-top-2">
+                    {teamHistory.map(ice => (
+                      <div key={ice.id} className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col gap-3 relative group hover:shadow-md transition-shadow">
+                        
+                        {/* DELETE BUTTON */}
+                        <button 
+                          onClick={() => handleUndo(ice)}
+                          className="absolute top-2 right-2 p-2 bg-slate-50 text-slate-400 hover:bg-red-100 hover:text-red-600 rounded-full transition-colors opacity-0 group-hover:opacity-100"
+                          title="Undo / Delete"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+
+                        <div className="flex justify-between items-start pr-8">
+                          <div className="text-xs text-slate-400 font-mono">
+                            Completed: {new Date(ice.completed_at!).toLocaleDateString()}
+                          </div>
+                          <div className={`px-2 py-1 rounded text-xs font-bold ${ice.type === 'PRINCIPAL' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
+                            {ice.type}
+                          </div>
+                        </div>
+                        
+                        <div className="text-sm text-slate-600 font-medium">
+                          {ice.type === 'PRINCIPAL' ? (
+                            <span>Week {ice.week_incurred}: {ice.player_name} ({ice.score} pts)</span>
+                          ) : (
+                            <span>Interest Payment (Week {ice.week_incurred})</span>
+                          )}
+                        </div>
+
+                        {ice.proof_url ? (
+                           <a href={ice.proof_url} target="_blank" rel="noopener noreferrer" className="mt-2 w-full flex items-center justify-center gap-2 bg-slate-900 text-white py-2 rounded-lg font-bold hover:bg-slate-700 transition-colors">
+                             <PlayCircle size={16}/> Watch Proof
+                           </a>
+                        ) : (
+                          <div className="mt-2 w-full text-center py-2 bg-slate-100 text-slate-400 rounded-lg text-sm italic">No Video Attached</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
-
-              {ice.proof_url ? (
-                 <a href={ice.proof_url} target="_blank" rel="noopener noreferrer" className="mt-2 w-full flex items-center justify-center gap-2 bg-slate-900 text-white py-2 rounded-lg font-bold hover:bg-slate-700 transition-colors">
-                   <PlayCircle size={16}/> Watch Proof
-                 </a>
-              ) : (
-                <div className="mt-2 w-full text-center py-2 bg-slate-100 text-slate-400 rounded-lg text-sm italic">No Video Attached</div>
-              )}
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
@@ -367,11 +433,18 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
-      <input type="file" accept="video/*,image/*" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
+      <input 
+        type="file" 
+        accept="video/*,image/*" 
+        ref={fileInputRef} 
+        onChange={handleFileChange} 
+        onClick={(e) => { (e.target as HTMLInputElement).value = '' }}
+        className="hidden" 
+      />
 
       <div className="max-w-3xl mx-auto space-y-8">
         
-        {/* --- GLOBAL SECTION (ALWAYS VISIBLE) --- */}
+        {/* --- GLOBAL SECTION --- */}
 
         {/* 1. TITLE & COUNTDOWN */}
         <div className="text-center space-y-6">
