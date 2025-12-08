@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
-import { Beer, Lock, RefreshCw, Clock, Trophy, Flame, Upload, Video, History, PlayCircle, Calendar, ChevronDown, ChevronUp, Medal } from 'lucide-react';
+import { Beer, Lock, RefreshCw, Clock, Trophy, Flame, Upload, Video, History, PlayCircle, Calendar, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface IceLog {
   id: number;
@@ -34,29 +34,41 @@ export default function Home() {
   const [historyIces, setHistoryIces] = useState<IceLog[]>([]);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   
-  // UI State
+  // UI State - Default to 2024 to prevent flickering
   const [detectedWeek, setDetectedWeek] = useState<number | null>(null);
-  const [detectedSeason, setDetectedSeason] = useState<string>("2024");
+  const [detectedSeason, setDetectedSeason] = useState<string>("2024"); 
   const [historySeasonFilter, setHistorySeasonFilter] = useState<string>("2024");
   const [timeLeft, setTimeLeft] = useState("Calculating...");
   
-  // Collapsible State (Set of team names that are OPEN)
+  // Collapsible State
   const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectedIceIdRef = useRef<number | null>(null);
 
+  // 1. INITIAL LOAD & MEMORY
   useEffect(() => {
+    // Load from Memory first
+    const cachedWeek = localStorage.getItem('detectedWeek');
+    const cachedSeason = localStorage.getItem('detectedSeason');
+    if (cachedWeek) setDetectedWeek(Number(cachedWeek));
+    if (cachedSeason) {
+      setDetectedSeason(cachedSeason);
+      if (historySeasonFilter === "2024") setHistorySeasonFilter(cachedSeason);
+    }
+
+    // Fetch fresh data
     fetchActiveData();
     fetchHistoryData();
     // Start countdown
     const timer = setInterval(calculateCountdown, 1000);
-    // Initial Sync on load
+    // Background Sync
     handleSync(true); 
+    
     return () => clearInterval(timer);
   }, [historySeasonFilter]);
 
-  // Update leaderboard whenever history data changes or season changes
+  // Update leaderboard when season changes
   useEffect(() => {
     fetchLeaderboard();
   }, [detectedSeason]);
@@ -79,12 +91,12 @@ export default function Home() {
   };
 
   const fetchLeaderboard = async () => {
-    // Get all completed ices for the CURRENT detected season
+    const targetSeason = detectedSeason || "2024";
     const { data } = await supabase
       .from('ice_log')
       .select('team_name')
       .eq('status', 'COMPLETE')
-      .eq('season', detectedSeason);
+      .eq('season', targetSeason);
 
     if (data) {
       const counts: Record<string, number> = {};
@@ -94,7 +106,7 @@ export default function Home() {
 
       const sorted = Object.entries(counts)
         .map(([team_name, count]) => ({ team_name, count }))
-        .sort((a, b) => b.count - a.count); // Sort high to low
+        .sort((a, b) => b.count - a.count);
 
       setLeaderboard(sorted);
     }
@@ -107,14 +119,18 @@ export default function Home() {
       const res = await fetch('/api/sync', { method: 'POST' });
       const json = await res.json();
       
-      if (json.currentWeek) setDetectedWeek(json.currentWeek);
+      if (json.currentWeek) {
+        setDetectedWeek(json.currentWeek);
+        localStorage.setItem('detectedWeek', String(json.currentWeek));
+      }
       if (json.currentSeason) {
         setDetectedSeason(json.currentSeason);
+        localStorage.setItem('detectedSeason', json.currentSeason);
         if (!detectedSeason) setHistorySeasonFilter(json.currentSeason); 
       }
       
       await fetchActiveData();
-      await fetchLeaderboard(); // Refresh leaderboard on sync
+      await fetchLeaderboard();
     } catch (e) {
       console.error(e);
       if (!isBackground) alert("Sync failed. Check console.");
@@ -124,11 +140,8 @@ export default function Home() {
 
   const toggleTeam = (teamName: string) => {
     const newExpanded = new Set(expandedTeams);
-    if (newExpanded.has(teamName)) {
-      newExpanded.delete(teamName);
-    } else {
-      newExpanded.add(teamName);
-    }
+    if (newExpanded.has(teamName)) newExpanded.delete(teamName);
+    else newExpanded.add(teamName);
     setExpandedTeams(newExpanded);
   };
 
@@ -204,61 +217,9 @@ export default function Home() {
 
   const teamNames = Array.from(new Set(ices.map(i => i.team_name)));
 
-  // --- RENDER HELPERS ---
+  // --- SUB-RENDERERS ---
   const renderActiveLedger = () => (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      
-      {/* STATUS HEADER */}
-      <div className="flex flex-col sm:flex-row justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-200 gap-4">
-        <div className="flex items-center gap-3">
-          <div className="bg-green-100 p-2 rounded-lg text-green-700">
-            <Calendar size={24} />
-          </div>
-          <div className="text-left">
-            <div className="text-xs text-slate-400 font-bold uppercase tracking-wider">Current NFL State</div>
-            <div className="font-bold text-slate-800 text-lg">
-              {detectedWeek ? `Week ${detectedWeek}` : 'Loading...'} • {detectedSeason}
-            </div>
-          </div>
-        </div>
-        
-        <button 
-          onClick={() => handleSync(false)} 
-          disabled={loading} 
-          className="text-slate-400 hover:text-blue-600 transition-colors flex items-center gap-2 text-sm font-semibold"
-          title="Force check for new scores"
-        >
-          {loading ? <RefreshCw className="animate-spin" size={16} /> : <RefreshCw size={16} />} 
-          {loading ? 'Updating...' : 'Force Sync'}
-        </button>
-      </div>
-
-      {/* --- LEADERBOARD SECTION --- */}
-      {leaderboard.length > 0 && (
-        <div className="bg-gradient-to-r from-blue-900 to-slate-800 rounded-2xl shadow-lg p-6 text-white relative overflow-hidden">
-          <div className="flex items-center gap-3 mb-4 relative z-10">
-            <Trophy className="text-yellow-400" />
-            <h3 className="font-bold text-lg">Season Leaders (Most Drank)</h3>
-          </div>
-          
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 relative z-10">
-            {leaderboard.slice(0, 3).map((entry, index) => (
-              <div key={entry.team_name} className="bg-white/10 p-3 rounded-lg backdrop-blur-sm flex items-center gap-3 border border-white/10">
-                <div className={`font-bold text-xl w-8 h-8 flex items-center justify-center rounded-full ${index === 0 ? 'bg-yellow-400 text-yellow-900' : index === 1 ? 'bg-slate-300 text-slate-800' : 'bg-orange-400 text-orange-900'}`}>
-                  {index + 1}
-                </div>
-                <div>
-                  <div className="font-bold text-sm truncate w-32">{entry.team_name}</div>
-                  <div className="text-xs opacity-70">{entry.count} Ices Cleared</div>
-                </div>
-              </div>
-            ))}
-          </div>
-          {/* Decorative Circle */}
-          <div className="absolute -right-10 -top-10 w-40 h-40 bg-white/5 rounded-full blur-2xl"></div>
-        </div>
-      )}
-
       {teamNames.length === 0 && (
         <div className="text-center py-12 bg-white rounded-2xl border-2 border-dashed border-slate-200">
           <div className="text-4xl mb-2">🎉</div>
@@ -394,7 +355,10 @@ export default function Home() {
       <input type="file" accept="video/*,image/*" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
 
       <div className="max-w-3xl mx-auto space-y-8">
-        {/* HEADER */}
+        
+        {/* --- GLOBAL SECTION (ALWAYS VISIBLE) --- */}
+
+        {/* 1. TITLE & COUNTDOWN */}
         <div className="text-center space-y-6">
           <h1 className="text-4xl md:text-5xl font-extrabold text-slate-900 flex flex-col md:flex-row items-center justify-center gap-3">
             <Beer className="w-12 h-12 text-blue-500" /> 
@@ -409,7 +373,59 @@ export default function Home() {
           </div>
         </div>
 
-        {/* TAB SWITCHER */}
+        {/* 2. STATUS HEADER (Auto-Detect Logic) */}
+        <div className="flex flex-col sm:flex-row justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-200 gap-4">
+          <div className="flex items-center gap-3">
+            <div className="bg-green-100 p-2 rounded-lg text-green-700">
+              <Calendar size={24} />
+            </div>
+            <div className="text-left">
+              <div className="text-xs text-slate-400 font-bold uppercase tracking-wider">Current NFL State</div>
+              <div className="font-bold text-slate-800 text-lg">
+                {detectedWeek 
+                  ? `Week ${detectedWeek} • ${detectedSeason}` 
+                  : <span className="text-slate-400 italic font-normal">Syncing League Info...</span>}
+              </div>
+            </div>
+          </div>
+          
+          <button 
+            onClick={() => handleSync(false)} 
+            disabled={loading} 
+            className="text-slate-400 hover:text-blue-600 transition-colors flex items-center gap-2 text-sm font-semibold"
+            title="Force check for new scores"
+          >
+            {loading ? <RefreshCw className="animate-spin" size={16} /> : <RefreshCw size={16} />} 
+            {loading ? 'Updating...' : 'Force Sync'}
+          </button>
+        </div>
+
+        {/* 3. LEADERBOARD (Moved OUT of tabs so it never hides) */}
+        {leaderboard.length > 0 && (
+          <div className="bg-gradient-to-r from-blue-900 to-slate-800 rounded-2xl shadow-lg p-6 text-white relative overflow-hidden animate-in zoom-in-95 duration-500">
+            <div className="flex items-center gap-3 mb-4 relative z-10">
+              <Trophy className="text-yellow-400" />
+              <h3 className="font-bold text-lg">Season Leaders (Most Drank)</h3>
+            </div>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 relative z-10">
+              {leaderboard.slice(0, 3).map((entry, index) => (
+                <div key={entry.team_name} className="bg-white/10 p-3 rounded-lg backdrop-blur-sm flex items-center gap-3 border border-white/10">
+                  <div className={`font-bold text-xl w-8 h-8 flex items-center justify-center rounded-full ${index === 0 ? 'bg-yellow-400 text-yellow-900' : index === 1 ? 'bg-slate-300 text-slate-800' : 'bg-orange-400 text-orange-900'}`}>
+                    {index + 1}
+                  </div>
+                  <div>
+                    <div className="font-bold text-sm truncate w-32">{entry.team_name}</div>
+                    <div className="text-xs opacity-70">{entry.count} Ices Cleared</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="absolute -right-10 -top-10 w-40 h-40 bg-white/5 rounded-full blur-2xl"></div>
+          </div>
+        )}
+
+        {/* --- TABBED SECTION --- */}
         <div className="flex p-1 bg-slate-200 rounded-xl">
           <button 
             onClick={() => setActiveTab('active')}
@@ -425,7 +441,7 @@ export default function Home() {
           </button>
         </div>
 
-        {/* CONTENT */}
+        {/* TAB CONTENT */}
         {activeTab === 'active' ? renderActiveLedger() : renderHistory()}
       </div>
     </main>
