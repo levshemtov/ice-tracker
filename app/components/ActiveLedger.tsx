@@ -54,7 +54,7 @@ export const ActiveLedger = ({ ices, expandedTeams, toggleTeam, uploadingId, tri
                         </div>
                       </div>
                       <button onClick={() => payOneInterest(interest)} disabled={uploadingId !== null} className="w-full sm:w-auto bg-red-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-red-700 shadow-sm transition-all flex items-center justify-center gap-2">
-                        {uploadingId && interest.some(i => i.id === uploadingId) ? <><RefreshCw className="animate-spin" size={18} /> Uploading...</> : <><Upload size={18} /> Clear 1 Ice (-1)</>}
+                        {uploadingId && interest.some(i => i.id === uploadingId) ? <><RefreshCw className="animate-spin" size={18} /> Uploading...</> : <><Upload size={18} /> Clear 1 Ice </>}
                       </button>
                     </div>
                   )}

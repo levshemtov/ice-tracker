@@ -17,7 +17,7 @@ export const HistoryVault = ({ historyIces, historySeasonFilter, availableSeason
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="flex items-center justify-between bg-white dark:bg-slate-900 p-4 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800">
-        <h3 className="font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2"><History size={20} /> History Vault</h3>
+        <h3 className="font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2"><History size={20} /> Season</h3>
         <select
           value={historySeasonFilter}
           onChange={(e) => setHistorySeasonFilter(e.target.value)}

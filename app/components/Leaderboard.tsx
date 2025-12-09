@@ -20,7 +20,7 @@ export const Leaderboard = ({ leaderboard }: LeaderboardProps) => {
             <div className={`font-bold text-xl w-8 h-8 flex items-center justify-center rounded-full ${index === 0 ? 'bg-yellow-400 text-yellow-900' : index === 1 ? 'bg-slate-300 text-slate-800' : 'bg-orange-400 text-orange-900'}`}>{index + 1}</div>
             <div>
               <div className="font-bold text-sm truncate w-32">{entry.team_name}</div>
-              <div className="text-xs opacity-70">{entry.count} Ices Cleared</div>
+              <div className="text-xs opacity-70">{entry.count} {entry.count === 1 ? 'Ice' : 'Ices'} Cleared</div>
             </div>
           </div>
         ))}
