@@ -100,16 +100,18 @@ export default function Home() {
       .eq('status', 'COMPLETE')
       .eq('season', targetSeason);
 
-    if (data) {
-      const counts: Record<string, number> = {};
-      data.forEach(row => {
-        counts[row.team_name] = (counts[row.team_name] || 0) + 1;
-      });
-      const sorted = Object.entries(counts)
-        .map(([team_name, count]) => ({ team_name, count }))
-        .sort((a, b) => b.count - a.count);
-      setLeaderboard(sorted);
+    if (!data || data.length === 0) {
+      setLeaderboard([]);
+      return;
     }
+    const counts: Record<string, number> = {};
+    data.forEach(row => {
+      counts[row.team_name] = (counts[row.team_name] || 0) + 1;
+    });
+    const sorted = Object.entries(counts)
+      .map(([team_name, count]) => ({ team_name, count }))
+      .sort((a, b) => b.count - a.count);
+    setLeaderboard(sorted);
   };
 
   const fetchAvailableSeasons = async () => {
