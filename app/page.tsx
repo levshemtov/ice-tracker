@@ -12,9 +12,6 @@ import { ActiveLedger } from './components/ActiveLedger';
 import { HistoryVault } from './components/HistoryVault';
 
 export default function Home() {
-  // Note: Theme state is now encapsulated in ThemeToggle component
-
-  // --- APP STATE ---
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   
   // Data State
@@ -26,23 +23,22 @@ export default function Home() {
   
   // UI State
   const [detectedWeek, setDetectedWeek] = useState<number | null>(null);
-  const [detectedSeason, setDetectedSeason] = useState<string>('2025'); // Revert to a sensible default
-  const [historySeasonFilter, setHistorySeasonFilter] = useState<string>('2025'); // Revert to a sensible default
-  const [availableSeasons, setAvailableSeasons] = useState<string[]>(['2025']); // Revert to a sensible default
+  const [detectedSeason, setDetectedSeason] = useState<string>('2025'); 
+  const [historySeasonFilter, setHistorySeasonFilter] = useState<string>('2025'); 
+  const [availableSeasons, setAvailableSeasons] = useState<string[]>(['2025']); 
   const [timeLeft, setTimeLeft] = useState("Calculating...");
   
-  // Collapsible State
   const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectedIceIdRef = useRef<number | null>(null);
 
-  // 1. INITIAL LOAD & MEMORY
+  // 1. INITIAL LOAD
   useEffect(() => {
     const cachedWeek = localStorage.getItem('detectedWeek');
     const cachedSeason = localStorage.getItem('detectedSeason');
     
-    let seasonToUse = '2025'; // Start with the default
+    let seasonToUse = '2025'; 
 
     if (cachedWeek) setDetectedWeek(Number(cachedWeek));
     if (cachedSeason) {
@@ -52,7 +48,7 @@ export default function Home() {
     }
 
     fetchActiveData();
-    fetchHistoryData(seasonToUse);
+    fetchHistoryData(seasonToUse); // Fetch immediately with whatever we have
     fetchLeaderboard(seasonToUse);
     fetchAvailableSeasons();
 
@@ -60,7 +56,15 @@ export default function Home() {
     handleSync(true); 
     
     return () => clearInterval(timer);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 2. RE-FETCH ON TAB SWITCH
+  // This ensures the vault is never empty when you click the tab
+  useEffect(() => {
+    if (activeTab === 'history') {
+      fetchHistoryData();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     fetchLeaderboard(detectedSeason);
@@ -76,10 +80,8 @@ export default function Home() {
     if (data) setIces(data as IceLog[]);
   };
 
-const fetchHistoryData = async (seasonOverride?: string) => {
+  const fetchHistoryData = async (seasonOverride?: string) => {
     const targetSeason = seasonOverride || historySeasonFilter;    
-    // No need to check for null anymore
-    
     const { data } = await supabase
       .from('ice_log')
       .select('*')
@@ -92,7 +94,6 @@ const fetchHistoryData = async (seasonOverride?: string) => {
 
   const fetchLeaderboard = async (seasonOverride?: string) => {
     const targetSeason = seasonOverride || detectedSeason;
-    // No need to check for null anymore
     const { data } = await supabase
       .from('ice_log')
       .select('team_name')
@@ -112,12 +113,15 @@ const fetchHistoryData = async (seasonOverride?: string) => {
   };
 
   const fetchAvailableSeasons = async () => {
-    const { data } = await supabase.from('distinct_seasons').select('season');
-    if (data) {
-      const seasons = data.map(s => s.season).filter(Boolean).sort((a, b) => b.localeCompare(a));
-      if (seasons.length > 0) {
-        setAvailableSeasons(seasons);
+    // Check if the distinct_seasons view exists, otherwise fallback to simple query or error handle
+    try {
+      const { data } = await supabase.from('distinct_seasons').select('season');
+      if (data) {
+        const seasons = data.map(s => s.season).filter(Boolean).sort((a, b) => b.localeCompare(a));
+        if (seasons.length > 0) setAvailableSeasons(seasons);
       }
+    } catch (e) {
+      console.error("View 'distinct_seasons' might be missing.", e);
     }
   };
 
@@ -135,12 +139,15 @@ const fetchHistoryData = async (seasonOverride?: string) => {
       if (json.currentSeason) {
         setDetectedSeason(json.currentSeason);
         localStorage.setItem('detectedSeason', json.currentSeason);
-        setHistorySeasonFilter(json.currentSeason); // Always align history filter with latest sync
+        setHistorySeasonFilter(json.currentSeason);
       }
       
+      // ✅ FORCE FETCH ALL DATA (Even if season didn't change)
       await fetchActiveData();
       await fetchLeaderboard(json.currentSeason);
+      await fetchHistoryData(json.currentSeason); // <--- Added this line
       await fetchAvailableSeasons();
+
     } catch (e) {
       console.error(e);
       if (!isBackground) alert("Sync failed. Check console.");
@@ -158,24 +165,15 @@ const fetchHistoryData = async (seasonOverride?: string) => {
   // --- UNDO / DELETE LOGIC ---
   const handleUndo = async (ice: IceLog) => {
     if (!confirm("Are you sure? This will delete the video and move the Ice back to 'Pending'.")) return;
-    
     setLoading(true);
     try {
       if (ice.proof_url) {
         const path = ice.proof_url.split('/proofs/')[1];
-        if (path) {
-          await supabase.storage.from('proofs').remove([path]);
-        }
+        if (path) await supabase.storage.from('proofs').remove([path]);
       }
-
-      const { error } = await supabase
-        .from('ice_log')
-        .update({
-          status: 'PENDING',
-          completed_at: null,
-          proof_url: null
-        })
-        .eq('id', ice.id);
+      const { error } = await supabase.from('ice_log').update({
+          status: 'PENDING', completed_at: null, proof_url: null 
+        }).eq('id', ice.id);
 
       if (error) throw error;
 
@@ -183,7 +181,6 @@ const fetchHistoryData = async (seasonOverride?: string) => {
       await fetchHistoryData();
       await fetchLeaderboard();
       await fetchAvailableSeasons();
-
     } catch (e) {
       alert("Error undoing ice: " + (e as any).message);
     } finally {
@@ -202,7 +199,6 @@ const fetchHistoryData = async (seasonOverride?: string) => {
     const iceId = selectedIceIdRef.current;
     
     if (fileInputRef.current) fileInputRef.current.value = '';
-
     if (!file || !iceId) return;
 
     setUploadingId(iceId);
@@ -214,26 +210,20 @@ const fetchHistoryData = async (seasonOverride?: string) => {
 
       const { data: { publicUrl } } = supabase.storage.from('proofs').getPublicUrl(fileName);
 
-      const { error: dbError } = await supabase
-        .from('ice_log')
-        .update({ 
-          status: 'COMPLETE', 
-          completed_at: new Date().toISOString(),
-          proof_url: publicUrl 
-        })
-        .eq('id', iceId);
+      const { error: dbError } = await supabase.from('ice_log').update({ 
+          status: 'COMPLETE', completed_at: new Date().toISOString(), proof_url: publicUrl 
+        }).eq('id', iceId);
 
       if (dbError) throw dbError;
 
+      // Quick Refresh
       await fetchActiveData();
       await fetchHistoryData();
-      await fetchLeaderboard();
+      await fetchLeaderboard(detectedSeason);
       await fetchAvailableSeasons();
       
       setUploadingId(null);
       selectedIceIdRef.current = null;
-
-      handleSync(true).catch(console.error);
 
     } catch (error) {
       alert("Error uploading proof: " + (error as any).message);
@@ -247,18 +237,15 @@ const fetchHistoryData = async (seasonOverride?: string) => {
     triggerUpload(teamInterestIces[0].id);
   };
 
-  // --- TIME LOGIC ---
   const calculateCountdown = () => {
     const now = new Date();
     const d = new Date();
     const currentDay = d.getDay(); 
-    const targetDay = 2; // Tuesday
+    const targetDay = 2; 
     let daysUntil = targetDay - currentDay;
     if (daysUntil <= 0) daysUntil += 7;
-    
     d.setDate(d.getDate() + daysUntil);
     d.setHours(0, 0, 0, 0); 
-    
     const diff = d.getTime() - now.getTime();
     const days = Math.floor(diff / (1000 * 60 * 60 * 24));
     const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
@@ -295,7 +282,6 @@ const fetchHistoryData = async (seasonOverride?: string) => {
 
         <Leaderboard leaderboard={leaderboard} />
 
-        {/* --- TABBED SECTION --- */}
         <div className="flex p-1 bg-slate-200 dark:bg-slate-800 rounded-xl">
           <button 
             onClick={() => setActiveTab('active')}
@@ -311,7 +297,6 @@ const fetchHistoryData = async (seasonOverride?: string) => {
           </button>
         </div>
 
-        {/* TAB CONTENT */}
         {activeTab === 'active' ? (
           <ActiveLedger 
             ices={ices}
